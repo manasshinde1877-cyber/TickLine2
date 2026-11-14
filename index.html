@@ -118,7 +118,28 @@ button{cursor:pointer;transition:background .15s,color .15s}
 /* ============================================================
    INDICATOR POPOVER  — centered modal overlay
    ============================================================ */
-.panel-ind-wrap{position:relative;margin-left:auto}
+.panel-actions{position:relative;margin-left:auto;display:flex;align-items:center;gap:6px}
+.panel-recenter-btn{
+  background:var(--raise);border:1px solid var(--line);border-radius:5px;
+  padding:2px 8px;font-size:11px;color:var(--dim);cursor:pointer;
+  white-space:nowrap;display:inline-flex;align-items:center;gap:4px;
+  transition:background .15s,color .15s,border-color .15s;
+  font-family:var(--sans);
+}
+.panel-recenter-btn:hover{color:var(--text);border-color:var(--accent);background:var(--panel)}
+.panel-float-recenter{
+  position:absolute;right:78px;bottom:30px;z-index:15;
+  width:26px;height:26px;border-radius:50%;
+  background:var(--panel);border:1px solid var(--line);
+  color:var(--dim);display:flex;align-items:center;justify-content:center;
+  cursor:pointer;padding:0;
+  box-shadow:0 2px 8px rgba(0,0,0,0.25);
+  transition:background .15s,color .15s,border-color .15s,transform .15s;
+}
+.panel-float-recenter:hover{
+  color:var(--accent);border-color:var(--accent);background:var(--raise);
+  transform:scale(1.08);
+}
 .panel-ind-btn{
   background:var(--raise);border:1px solid var(--line);border-radius:5px;
   padding:2px 8px;font-size:11px;color:var(--dim);cursor:pointer;
@@ -436,7 +457,6 @@ const KL   = {1:['1s',1],5:['1s',5],60:['1m',1],300:['5m',1],600:['5m',2],900:['
 const SYMS = [
   {id:'BTCUSDT',name:'Bitcoin',dec:2},{id:'ETHUSDT',name:'Ethereum',dec:2},
   {id:'XAUTUSDT',name:'Tether Gold',dec:2},{id:'PAXGUSDT',name:'PAX Gold',dec:2},
-  {id:'NIFTY50',name:'Nifty 50',dec:2,source:'upstox'},{id:'SENSEX',name:'Sensex',dec:2,source:'upstox'},
 ];
 const S = {};
 SYMS.forEach(s => S[s.id] = Object.assign(
@@ -468,7 +488,6 @@ function fillGaps(a, tf){
 }
 
 async function fetchBars(sym, tf){
-  if (S[sym] && S[sym].source === 'upstox') return fetchBarsUpstox(sym, tf);
   const [iv]=KL[tf];
   const rows=await jget(`/api/v3/klines?symbol=${sym}&interval=${iv}&limit=1000`);
   const out=[]; let cur=null;
@@ -497,9 +516,7 @@ function setFeed(state,text){
 }
 
 function connectFeed(){
-  // Only subscribe Binance streams for crypto symbols
-  const cryptoSyms = SYMS.filter(s => !s.source);
-  const streams=cryptoSyms.map(s=>{ const l=s.id.toLowerCase(); return l+'@aggTrade/'+l+'@ticker'; }).join('/');
+  const streams=SYMS.map(s=>{ const l=s.id.toLowerCase(); return l+'@aggTrade/'+l+'@ticker'; }).join('/');
   let ws, opened=false;
   setFeed('wait','Connecting');
   try { ws=new WebSocket(WSH[Feed.host%WSH.length]+'/stream?streams='+streams); } catch(e){ return retry(); }
@@ -516,121 +533,20 @@ function connectFeed(){
 }
 
 /* ============================================================
-   UPSTOX INTEGRATION — Indian indices (Nifty 50, Sensex)
-   ============================================================ */
-const UPSTOX_BASE = 'https://api.upstox.com/v2';
-const UPSTOX_INSTRUMENTS = {
-  'NIFTY50': 'NSE_INDEX|Nifty 50',
-  'SENSEX':  'BSE_INDEX|SENSEX',
-};
-// Upstox Credentials
-const UPSTOX_API_KEY      = '197a8d64-d5bb-4c6e-8ccb-5c42bd7f9847';
-const UPSTOX_API_SECRET   = 'lukk0ia2oe';
-const UPSTOX_ACCESS_TOKEN = 'eyJ0eXAiOiJKV1QiLCJrZXlfaWQiOiJza192MS4wIiwiYWxnIjoiSFMyNTYifQ.eyJzdWIiOiI4OEJISDkiLCJqdGkiOiI2YWYyZTQ0Y2QwMGIwMDUyODdiZDNiOTciLCJpc011bHRpQ2xpZW50IjpmYWxzZSwiaXNQbHVzUGxhbiI6ZmFsc2UsImlhdCI6MTc5NDMwMzA1MiwiaXNzIjoidWRhcGktZ2F0ZXdheS1zZXJ2aWNlIiwiZXhwIjoxNzk0MzQ4MDAwfQ.4FKQU2vgvA7YioaTJZ_SKdtjHQ4G2zj7RkDO9O04dfk';
-
-function upstoxToken(){ return UPSTOX_ACCESS_TOKEN; }
-
-async function upstoxGet(path){
-  const token = upstoxToken();
-  if (!token) throw new Error('No Upstox access token configured.');
-  const r = await fetch(UPSTOX_BASE + path, {
-    headers: { 'Authorization': 'Bearer ' + token, 'Accept': 'application/json' },
-  });
-  if (r.status === 401) throw new Error('Upstox token expired or invalid.');
-  if (!r.ok) {
-    let errDetail = 'Upstox HTTP ' + r.status;
-    try {
-      const errJson = await r.json();
-      if (errJson && errJson.errors && errJson.errors[0]) errDetail += ': ' + errJson.errors[0].message;
-    } catch(e){}
-    throw new Error(errDetail);
-  }
-  const json = await r.json();
-  if (json.status !== 'success') throw new Error('Upstox: ' + (json.message || 'error'));
-  return json.data;
-}
-
-async function fetchBarsUpstox(sym, tf){
-  const instrumentKey = UPSTOX_INSTRUMENTS[sym];
-  if (!instrumentKey) throw new Error('Unknown Upstox symbol: ' + sym);
-  const encKey = encodeURIComponent(instrumentKey);
-
-  // Upstox API v2 accepts: 1minute, 30minute, day, week, month
-  const interval = tf >= 86400 ? 'day' : '1minute';
-  // Upstox max date range for 1minute candles is 30 days
-  const daysBack = tf >= 86400 ? 365 : 10;
-  const toDate   = new Date();
-  const fromDate = new Date(Date.now() - daysBack * 86400000);
-  const fmt = d => d.toISOString().slice(0, 10);
-
-  const data = await upstoxGet(`/historical-candle/${encKey}/${interval}/${fmt(toDate)}/${fmt(fromDate)}`);
-  const candles = data.candles;
-  if (!candles || !candles.length) throw new Error('No Upstox data returned');
-
-  // Response is newest-first; reverse to chronological
-  const out = candles.slice().reverse().map(c => {
-    const utcSec = Math.floor(new Date(c[0]).getTime() / 1000);
-    return { t: bkt(utcSec, tf), o: +c[1], h: +c[2], l: +c[3], c: +c[4], v: +c[5] };
-  });
-
-  // Merge duplicate timestamps (when our TF > API interval, e.g. 1m -> 5m/15m/1h)
-  const merged = [];
-  for (const bar of out){
-    const prev = merged[merged.length - 1];
-    if (prev && prev.t === bar.t){
-      if (bar.h > prev.h) prev.h = bar.h;
-      if (bar.l < prev.l) prev.l = bar.l;
-      prev.c = bar.c; prev.v += bar.v;
-    } else {
-      merged.push({ ...bar });
-    }
-  }
-  if (!merged.length) throw new Error('No Upstox candles after merge');
-  const s = S[sym];
-  if (s.price == null){ s.price = merged[merged.length-1].c; s.hi = s.lo = s.price; }
-  // Do not call fillGaps for stock exchange data (markets close overnight and weekends)
-  return merged;
-}
-
-// Poll Upstox live quotes every 3 s (REST polling — no WebSocket needed)
-let _upstoxPollTimer = null;
-async function pollUpstoxQuotes(){
-  if (!upstoxToken()) return;
-  const upstoxSyms = SYMS.filter(s => s.source === 'upstox');
-  if (!upstoxSyms.length) return;
-  const keys = upstoxSyms.map(s => encodeURIComponent(UPSTOX_INSTRUMENTS[s.id])).join(',');
-  try {
-    const data = await upstoxGet(`/market-quote/quotes?instrument_key=${keys}`);
-    for (const sym of upstoxSyms){
-      // Response key uses ':' separator instead of '|'
-      const responseKey = UPSTOX_INSTRUMENTS[sym.id].replace('|', ':');
-      const q = data[responseKey];
-      if (!q) continue;
-      const s = S[sym.id];
-      const lp = +q.last_price;
-      s.price = lp;
-      if (lp > s.hiAcc) s.hiAcc = lp;
-      if (lp < s.loAcc) s.loAcc = lp;
-      // Calculate % change from previous close
-      if (q.ohlc && q.ohlc.close && q.ohlc.close > 0){
-        s.chgPct = (lp - q.ohlc.close) / q.ohlc.close * 100;
-      }
-    }
-  } catch(e){ /* silent — market may be closed */ }
-}
-
-function startUpstoxPolling(){
-  if (_upstoxPollTimer) clearInterval(_upstoxPollTimer);
-  pollUpstoxQuotes(); // immediate first fetch
-  _upstoxPollTimer = setInterval(pollUpstoxQuotes, 3000);
-}
-
-/* ============================================================
    NUMBER FORMATTING
    ============================================================ */
 const NF = {};
 const fp = (id,v) => { const d=S[id].dec; return (NF[d]||(NF[d]=new Intl.NumberFormat('en-US',{minimumFractionDigits:d,maximumFractionDigits:d}))).format(v); };
 const fv = v => v>=1e6?(v/1e6).toFixed(2)+'M':v>=1e3?(v/1e3).toFixed(1)+'K':v.toFixed(v<10?3:1);
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function formatTimeBadge(t, tf){
+  const d = new Date((t - OFF) * 1000);
+  const pad = n => String(n).padStart(2, '0');
+  const dayStr = `${d.getDate()} ${MONTH_NAMES[d.getMonth()]}`;
+  const timeStr = `${pad(d.getHours())}:${pad(d.getMinutes())}` + (tf <= 5 ? `:${pad(d.getSeconds())}` : '');
+  if (tf >= 86400) return `${dayStr} ${d.getFullYear()}`;
+  return `${dayStr} ${timeStr}`;
+}
 
 /* ============================================================
    INDICATORS — pure functions, all periods configurable
@@ -787,8 +703,8 @@ function crosshairOpts(visible){
   return {
     crosshair:{
       mode:0, // CrosshairMode.Normal
-      vertLine:{ width:2, color:'rgba(0, 0, 0, 0.2)', style:1, labelBackgroundColor:C.accent, visible:visible!==false },
-      horzLine:{ width:2, color:'rgba(0, 0, 0, 0.2)', style:1, labelBackgroundColor:C.accent, visible:visible!==false },
+      vertLine:{ width:1, color:'transparent', style:1, labelVisible:false, visible:visible!==false },
+      horzLine:{ width:1, color:'transparent', style:1, labelVisible:false, visible:visible!==false },
     }
   };
 }
@@ -801,7 +717,8 @@ function chartOpts(extra){
     ...crosshairOpts(true),
     rightPriceScale:{borderColor:C.line, minimumWidth:72},
     timeScale:{borderColor:C.line, timeVisible:true, secondsVisible:true, rightOffset:8},
-    handleScale:{axisPressedMouseMove:true},
+    handleScroll:{mouseWheel:true, pressedMouseMove:false, horzTouchDrag:true, vertTouchDrag:true},
+    handleScale:{axisPressedMouseMove:true, mouseWheel:true, pinch:true},
   }, extra||{});
 }
 
@@ -818,10 +735,38 @@ function segDist(px,py,a,b){ const dx=b.x-a.x,dy=b.y-a.y,l=dx*dx+dy*dy; let t=l?
 /* ============================================================
    PANEL
    ============================================================ */
+/* Translucent band between two price levels (used for RSI OB/OS zone) */
+class LevelBand {
+  constructor(series, getLevels, color){
+    this._series = series; this._getLevels = getLevels; this._color = color;
+    const self = this;
+    this._view = {
+      zOrder: () => 'bottom',
+      renderer: () => ({
+        draw(target){
+          target.useBitmapCoordinateSpace(scope => {
+            const [a, b] = self._getLevels();
+            const y1 = self._series.priceToCoordinate(a);
+            const y2 = self._series.priceToCoordinate(b);
+            if (y1 === null || y2 === null) return;
+            const top = Math.min(y1, y2) * scope.verticalPixelRatio;
+            const h   = Math.abs(y2 - y1) * scope.verticalPixelRatio;
+            scope.context.fillStyle = self._color;
+            scope.context.fillRect(0, top, scope.bitmapSize.width, h);
+          });
+        }
+      })
+    };
+  }
+  updateAllViews(){}
+  paneViews(){ return [this._view]; }
+}
+
 class Panel {
   constructor(i, cfg){
     Object.assign(this,{
-      i, sym:cfg.sym, tf:cfg.tf, ind:mkInd(cfg.ind),
+      i, sym:cfg.sym, tf:cfg.tf, ind:mkInd(cfg.ind), yZoom:1, yShift:0, _loadedKey:null,
+      pan:null,
       bars:[], byT:new Map(), selId:null, creating:null, drag:null,
       fitted:false, visible:true, sub:null, syncing:false, hover:false,
       sSmaList:[], sEmaList:[], sDemaList:[], sBbList:[], pivotLines:[],
@@ -832,10 +777,23 @@ class Panel {
     el.innerHTML =
       `<div class="phead"><select class="sym" aria-label="Symbol"></select><select class="tfsel" aria-label="Timeframe"></select>
        <span class="px mono"></span><span class="chg mono"></span>
-       <div class="panel-ind-wrap"><button class="panel-ind-btn" aria-haspopup="dialog" aria-label="Open indicators">Indicators</button></div>
+       <div class="panel-actions">
+         <button class="panel-recenter-btn" title="Recenter & focus chart" aria-label="Recenter chart">
+           <svg viewBox="0 0 24 24" width="11" height="11" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/></svg>
+           <span>Recenter</span>
+         </button>
+         <button class="panel-ind-btn" aria-haspopup="dialog" aria-label="Open indicators">Indicators</button>
+       </div>
        <span class="ohlc mono"></span></div>
        <div class="pbody">
-         <div class="mw"><div class="ch"></div><canvas class="draw-cv"></canvas><div class="msg" role="status"></div></div>
+         <div class="mw">
+           <div class="ch"></div>
+           <canvas class="draw-cv"></canvas>
+           <button class="panel-float-recenter" title="Recenter & focus chart" aria-label="Recenter chart">
+             <svg viewBox="0 0 24 24" width="13" height="13" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="8"/><line x1="12" y1="2" x2="12" y2="4"/><line x1="12" y1="20" x2="12" y2="22"/><line x1="2" y1="12" x2="4" y2="12"/><line x1="20" y1="12" x2="22" y2="12"/></svg>
+           </button>
+           <div class="msg" role="status"></div>
+         </div>
          <div class="sub" hidden><div class="sub-handle"></div><span class="sublbl"></span><div class="ch"></div></div>
        </div>
        <div class="zen-label"></div>`;
@@ -846,7 +804,7 @@ class Panel {
       symSel:q('.sym'), tfSel:q('.tfsel'), pxEl:q('.px'), chgEl:q('.chg'), ohlcEl:q('.ohlc'),
       mw:q('.mw'), chEl:q('.mw .ch'), cv:q('canvas.draw-cv'), msgEl:q('.msg'),
       subBox:q('.sub'), subEl:q('.sub .ch'), subLbl:q('.sublbl'),
-      indBtn:q('.panel-ind-btn'), zenLbl:q('.zen-label'),
+      indBtn:q('.panel-ind-btn'), recenterBtn:q('.panel-recenter-btn'), floatRecenterBtn:q('.panel-float-recenter'), zenLbl:q('.zen-label'),
       pbody:q('.pbody'), subHandle:q('.sub-handle'),
     });
 
@@ -863,17 +821,49 @@ class Panel {
       App.openIndModal(this);
     };
 
+    // Recenter buttons
+    this.recenterBtn.onclick = e => {
+      e.stopPropagation();
+      App.setActive(this);
+      this.recenter();
+    };
+    this.floatRecenterBtn.onclick = e => {
+      e.stopPropagation();
+      App.setActive(this);
+      this.recenter();
+    };
+
     this._buildChart();
     this._setupSubResize();
 
     // Panel-level capture: set active (fires before mw listener)
     el.addEventListener('mousedown', () => App.setActive(this), true);
-    // mw capture: drawing / selection
+    // mw capture: drawing / selection / panning
     this.mw.addEventListener('mousedown', e => this.onDown(e), true);
     this.mw.addEventListener('mousemove', e => this.onMove(e), true);
-    this.mw.addEventListener('mouseleave', () => { this.hover = false; });
-    window.addEventListener('mousemove', e => this.dragMove(e));
-    window.addEventListener('mouseup',   () => { this.drag = null; });
+    this.mw.addEventListener('mouseleave', () => {
+      this.hover = false;
+      if (App.crosshair) App.crosshair.active = false;
+    });
+    this.mw.addEventListener('wheel', e => this._onWheel(e), {capture:true, passive:false});
+    this.mw.addEventListener('dblclick', e => {
+      const {x,y} = this.local(e), pl = this.plot();
+      this.yZoom = 1;
+      this.yShift = 0;
+      this._refreshYScale();
+      if (x <= pl.w && y <= pl.h){
+        this.fit();
+      }
+    }, true);
+    window.addEventListener('mousemove', e => {
+      this.dragMove(e);
+      this.panMove(e);
+    });
+    window.addEventListener('mouseup', () => {
+      this.drag = null;
+      this.panEnd();
+    });
+    window.addEventListener('blur', () => this.panEnd());
     this.load();
   }
 
@@ -885,14 +875,58 @@ class Panel {
       lastValueVisible: false,
       priceLineVisible: false,
       crosshairMarkerVisible: false,
+      // while the user has Y-zoomed or Y-panned, only candles drive the price range
+      autoscaleInfoProvider: orig => (this.yZoom === 1 && !this.yShift) ? orig() : null,
     }, extra || {}));
+  }
+
+  /* Candle autoscale, scaled around its own centre by the Y-zoom factor and shifted by yShift */
+  _candleScale(orig){
+    const r = orig();
+    if (!r || !r.priceRange) return r;
+    const shift = this.yShift || 0;
+    const zoom  = this.yZoom  || 1;
+    if (zoom === 1 && shift === 0) return r;
+    const a = r.priceRange.minValue, b = r.priceRange.maxValue;
+    const c = (a + b) / 2 + shift, h = (b - a) / 2 * zoom;
+    return { priceRange:{ minValue:c - h, maxValue:c + h }, margins:r.margins };
+  }
+
+  _refreshYScale(){
+    this.chart.priceScale('right').applyOptions({ autoScale:true });
+    this.candles.applyOptions({});
+  }
+
+  /* Wheel over the price axis → Y-only zoom; over the time axis → X zoom anchored at cursor */
+  _onWheel(e){
+    if (!this.bars.length) return;
+    const {x,y} = this.local(e), pl = this.plot();
+    const onPrice = x > pl.w && y <= pl.h;
+    const onTime  = y > pl.h && x <= pl.w;
+    if (!onPrice && !onTime) return;           // plot area: default chart behaviour
+    e.preventDefault(); e.stopImmediatePropagation();
+    const f = Math.exp(Math.max(-100, Math.min(100, e.deltaY)) * 0.0015); // >1 zoom out, <1 zoom in
+    if (onPrice){
+      this.yZoom = Math.max(0.02, Math.min(50, this.yZoom * f));
+      this._refreshYScale();
+    } else {
+      const ts = this.chart.timeScale(), vr = ts.getVisibleLogicalRange();
+      const anchor = ts.coordinateToLogical(x);
+      if (!vr || anchor === null) return;
+      const width = vr.to - vr.from;
+      const nw = Math.max(5, Math.min(5000, width * f));
+      const ratio = (anchor - vr.from) / width;
+      const from = anchor - ratio * nw;
+      ts.setVisibleLogicalRange({ from, to: from + nw });
+    }
   }
 
   _buildChart(){
     rebuildColors();
     if (this.chart){ try{ this.chart.remove(); }catch(e){} }
     const ch = this.chart = LightweightCharts.createChart(this.chEl, chartOpts());
-    this.candles = ch.addCandlestickSeries({upColor:C.up, downColor:C.down, borderVisible:false, wickUpColor:C.up, wickDownColor:C.down});
+    this.candles = ch.addCandlestickSeries({upColor:C.up, downColor:C.down, borderVisible:false, wickUpColor:C.up, wickDownColor:C.down,
+      autoscaleInfoProvider: orig => this._candleScale(orig)});
     this.volSeries = ch.addHistogramSeries({priceFormat:{type:'volume'}, priceScaleId:'vol', lastValueVisible:false, priceLineVisible:false});
     ch.priceScale('vol').applyOptions({scaleMargins:{top:.86, bottom:0}});
 
@@ -1019,8 +1053,7 @@ class Panel {
   /* ----- data ----- */
   async load(){
     const tok=this.loadTok=(this.loadTok||0)+1, sym=this.sym, tf=this.tf;
-    const isUpstox = S[sym] && S[sym].source === 'upstox';
-    this.msgEl.textContent = 'Loading '+sym+(isUpstox ? ' from Upstox…' : ' from Binance…');
+    this.msgEl.textContent = 'Loading '+sym+' from Binance…';
     let bars;
     try { bars = await fetchBars(sym, tf); }
     catch(e){
@@ -1034,6 +1067,8 @@ class Panel {
     this.bars = bars;
     this.byT  = new Map(bars.map(b => [b.t, b]));
     const d = S[sym].dec;
+    const key = sym + '|' + tf;
+    if (this._loadedKey !== key){ this._loadedKey = key; this.yZoom = 1; this.yShift = 0; }   // new symbol/timeframe → reset Y zoom & pan
     this.candles.applyOptions({priceFormat:{type:'price', precision:d, minMove:1/10**d}});
     this.candles.setData(bars.map(b => ({time:b.t,open:b.o,high:b.h,low:b.l,close:b.c})));
     this.syncInd(true);
@@ -1044,13 +1079,16 @@ class Panel {
 
   fit(){ const n=this.bars.length; this.chart.timeScale().setVisibleLogicalRange({from:Math.max(0,n-110), to:n+12}); }
 
+  recenter(){
+    this.yZoom = 1;
+    this.yShift = 0;
+    this._refreshYScale();
+    this.fit();
+    if (this.bars.length) this.showOhlc(this.bars[this.bars.length-1]);
+  }
+
   onTick(){
     const s = S[this.sym];
-    // Upstox symbols get live price from polling — just refresh the quote display, skip bar building
-    if (s.source === 'upstox'){
-      if (s.price != null) this.updateQuote();
-      return;
-    }
     if (!this.visible || !this.bars.length || s.price==null || s.hi==null) return;
     const bt = bkt(nowUtc(), this.tf), cand = x => ({time:x.t,open:x.o,high:x.h,low:x.l,close:x.c});
     let last = this.bars[this.bars.length-1], added = 0;
@@ -1260,7 +1298,7 @@ class Panel {
     const kind=this.ind.sub; this.subBox.hidden=!kind;
     if (!kind) return;
     rebuildColors();
-    const sc = this.sub = LightweightCharts.createChart(this.subEl, chartOpts({timeScale:{visible:false,borderColor:C.line}}));
+    const sc = this.sub = LightweightCharts.createChart(this.subEl, chartOpts({timeScale:{visible:false,borderColor:C.line}, handleScroll:{pressedMouseMove:true}}));
 
     // label reflects current params
     const rsiN  = this._p('rsiN',14);
@@ -1278,6 +1316,8 @@ class Panel {
       this.sRsi.createPriceLine({price:rU, color:rsiOBCol,  lineStyle:1, lineWidth:2, axisLabelVisible:true, title:'OB'});
       this.sRsi.createPriceLine({price:rL, color:rsiOSCol,  lineStyle:1, lineWidth:2, axisLabelVisible:true, title:'OS'});
       this.sRsi.createPriceLine({price:rM, color:rsiMidCol, lineStyle:1, lineWidth:2, axisLabelVisible:false, title:''});
+      // translucent #CAA8D9 tint between OS and OB
+      try { this.sRsi.attachPrimitive(new LevelBand(this.sRsi, () => [rU, rL], 'rgba(202,168,217,0.36)')); } catch(e){}
     } else {
       this.sHist = sc.addHistogramSeries({priceLineVisible:false,lastValueVisible:false});
       this.sMac  = sc.addLineSeries(Object.assign({color:C.accent,lineWidth:2},o));
@@ -1363,22 +1403,95 @@ class Panel {
       e.preventDefault();
       this.selId = hit.d.id;
       this.drag  = {d:hit.d, mode:hit.mode, i:hit.i, t0:this.T(x), p0:this.P(y), orig:hit.d.pts.map(q=>({t:q.t,p:q.p}))};
-    } else {
-      this.selId = null;
+      return;
     }
+    this.selId = null;
+
+    // Start 2D chart pan (freely movable in X & Y)
+    const ts = this.chart.timeScale();
+    const vr = ts.getVisibleLogicalRange();
+    if (!vr) return;
+
+    const pTop = this.candles.coordinateToPrice(0);
+    const pBottom = this.candles.coordinateToPrice(pl.h);
+    const pricePerPx = (pTop !== null && pBottom !== null && pl.h > 0) ? (pTop - pBottom) / pl.h : 0;
+    const barsPerPx = pl.w > 0 ? (vr.to - vr.from) / pl.w : 1;
+
+    this.pan = {
+      startX: e.clientX,
+      startY: e.clientY,
+      from: vr.from,
+      to: vr.to,
+      initialYShift: this.yShift || 0,
+      barsPerPx,
+      pricePerPx,
+      active: false,
+    };
   }
 
   onMove(e){
     this.hover = true;
     if (!this.bars.length) return;
-    const {x,y} = this.local(e);
+    const {x,y} = this.local(e), pl = this.plot();
+    if (x >= 0 && x <= pl.w && y >= 0 && y <= pl.h){
+      App.crosshair = { relX: x / pl.w, relY: y / pl.h, active: true };
+    } else {
+      if (App.crosshair) App.crosshair.active = false;
+    }
     if (this.creating){
       const t=this.T(x), p=this.P(y);
       if (t!=null && p!=null) this.creating.cur={t,p};
-    } else if (!this.drag && App.tool==='cursor'){
-      const h = this.hitTest(x,y);
-      this.mw.style.cursor = h ? (h.mode==='h'?'grab':'move') : '';
+    } else if (!this.drag && (!this.pan || !this.pan.active) && App.tool==='cursor'){
+      if (x > pl.w && y <= pl.h){
+        this.mw.style.cursor = 'ns-resize';
+      } else if (y > pl.h && x <= pl.w){
+        this.mw.style.cursor = 'ew-resize';
+      } else {
+        const h = this.hitTest(x,y);
+        this.mw.style.cursor = h ? (h.mode==='h'?'grab':'move') : 'grab';
+      }
     }
+  }
+
+  panMove(e){
+    if (!this.pan || !this.bars.length) return;
+    const dx = e.clientX - this.pan.startX;
+    const dy = e.clientY - this.pan.startY;
+
+    const {x,y} = this.local(e), pl = this.plot();
+    if (x >= 0 && x <= pl.w && y >= 0 && y <= pl.h){
+      App.crosshair = { relX: x / pl.w, relY: y / pl.h, active: true };
+    }
+
+    if (!this.pan.active){
+      if (Math.hypot(dx, dy) < 3) return;
+      this.pan.active = true;
+      document.body.style.cursor = 'grabbing';
+      this.mw.style.cursor = 'grabbing';
+    }
+
+    // 1. Horizontal movement (time scale)
+    const dLogical = dx * this.pan.barsPerPx;
+    this.chart.timeScale().setVisibleLogicalRange({
+      from: this.pan.from - dLogical,
+      to: this.pan.to - dLogical,
+    });
+
+    // 2. Vertical movement (price scale)
+    if (this.pan.pricePerPx > 0){
+      const dPrice = dy * this.pan.pricePerPx;
+      this.yShift = this.pan.initialYShift + dPrice;
+      this._refreshYScale();
+    }
+  }
+
+  panEnd(){
+    if (!this.pan) return;
+    if (this.pan.active){
+      document.body.style.cursor = '';
+      this.mw.style.cursor = '';
+    }
+    this.pan = null;
   }
 
   dragMove(e){
@@ -1440,6 +1553,92 @@ class Panel {
       const pts=c.pts.concat([c.cur]);
       if (pts.length>=2 || c.type==='hline')
         this.drawOne(g,{type:c.type,color:App.color,pts:finishPts(c.type,pts.length>=2?pts:[c.cur])},false,pl,w,true);
+    }
+
+    // Synced crosshair dotted lines across all charts (matched by relative canvas coordinates)
+    if (App.crosshair && App.crosshair.active && App.crosshair.relX !== null && App.crosshair.relY !== null){
+      const cx = App.crosshair.relX * pl.w;
+      const cy = App.crosshair.relY * pl.h;
+      if (cx >= 0 && cx <= pl.w && cy >= 0 && cy <= pl.h){
+        g.save();
+        g.beginPath();
+        g.rect(0, 0, pl.w, pl.h);
+        g.clip();
+
+        g.setLineDash([3, 3]);
+        g.lineWidth = 1;
+        const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+        g.strokeStyle = isLight ? 'rgba(0, 0, 0, 0.45)' : 'rgba(255, 255, 255, 0.45)';
+
+        // Vertical dotted line
+        const vx = Math.round(cx) + 0.5;
+        g.beginPath();
+        g.moveTo(vx, 0);
+        g.lineTo(vx, pl.h);
+        g.stroke();
+
+        // Horizontal dotted line
+        const hy = Math.round(cy) + 0.5;
+        g.beginPath();
+        g.moveTo(0, hy);
+        g.lineTo(pl.w, hy);
+        g.stroke();
+
+        g.restore();
+
+        // Highlight price and time badges on the axes for this chart
+        const badgeBg = C.accent;
+        const badgeFg = isLight ? '#ffffff' : '#0d0d0d';
+
+        // 1. Price Badge (on right price scale at horizontal line position)
+        const price = this.P(cy);
+        if (price !== null && isFinite(price)){
+          const priceStr = fp(this.sym, price);
+          const badgeH = 18;
+          const badgeY = Math.max(1, Math.min(pl.h - badgeH - 1, Math.round(cy - badgeH / 2)));
+          const badgeX = pl.w + 1;
+          const badgeW = Math.max(68, w - pl.w - 2);
+
+          g.save();
+          g.fillStyle = badgeBg;
+          g.beginPath();
+          if (g.roundRect) g.roundRect(badgeX, badgeY, badgeW, badgeH, 3);
+          else g.rect(badgeX, badgeY, badgeW, badgeH);
+          g.fill();
+
+          g.fillStyle = badgeFg;
+          g.font = "600 11px 'IBM Plex Mono', monospace";
+          g.textAlign = 'center';
+          g.textBaseline = 'middle';
+          g.fillText(priceStr, badgeX + badgeW / 2, badgeY + badgeH / 2);
+          g.restore();
+        }
+
+        // 2. Time Badge (on bottom time scale at vertical line position)
+        const t = this.T(cx);
+        if (t !== null && isFinite(t)){
+          const timeStr = formatTimeBadge(t, this.tf);
+          g.save();
+          g.font = "600 11px 'IBM Plex Mono', monospace";
+          const tw = g.measureText(timeStr).width;
+          const badgeW = Math.round(tw + 12);
+          const badgeH = 18;
+          const badgeX = Math.max(2, Math.min(pl.w - badgeW - 2, Math.round(cx - badgeW / 2)));
+          const badgeY = pl.h + 2;
+
+          g.fillStyle = badgeBg;
+          g.beginPath();
+          if (g.roundRect) g.roundRect(badgeX, badgeY, badgeW, badgeH, 3);
+          else g.rect(badgeX, badgeY, badgeW, badgeH);
+          g.fill();
+
+          g.fillStyle = badgeFg;
+          g.textAlign = 'center';
+          g.textBaseline = 'middle';
+          g.fillText(timeStr, badgeX + badgeW / 2, badgeY + badgeH / 2);
+          g.restore();
+        }
+      }
     }
   }
 
@@ -1555,12 +1754,13 @@ const DEFAULTS = [
   {sym:'ETHUSDT',  tf:300,  ind:mkInd({vol:true, emaList:[{period:50}]})},
   {sym:'XAUTUSDT', tf:60,   ind:mkInd({vol:true, bbList:[{period:20, k:2}]})},
   {sym:'PAXGUSDT', tf:900,  ind:mkInd({vol:true, sub:'rsi'})},
-  {sym:'NIFTY50',  tf:60,   ind:mkInd({vol:true, emaList:[{period:20}]})},
-  {sym:'SENSEX',   tf:60,   ind:mkInd({vol:true, smaList:[{period:50}]})},
+  {sym:'BTCUSDT',  tf:900,  ind:mkInd({vol:true, emaList:[{period:20}]})},
+  {sym:'ETHUSDT',  tf:60,   ind:mkInd({vol:true, smaList:[{period:50}]})},
 ];
 
 const App = {
   tool:'cursor', color:'#d4a853', layout:4, active:null, panels:[],
+  crosshair:{ relX:null, relY:null, active:false },
 
   save(){
     try{ localStorage.setItem(STORE, JSON.stringify({layout:this.layout, panels:this.panels.map(p=>({sym:p.sym,tf:p.tf,ind:p.ind}))})); }catch(e){}
@@ -1950,8 +2150,7 @@ function buildUI(){
   // watchlist
   SYMS.forEach(s=>{
     const li=document.createElement('li'); li.dataset.id=s.id;
-    const badge = s.source === 'upstox' ? `<span class="upstox-badge">NSE/BSE</span>` : '';
-    li.innerHTML=`<span class="n">${s.id}${badge}</span><span class="p mono">—</span><span class="d">${s.name}</span><span class="c mono"></span>`;
+    li.innerHTML=`<span class="n">${s.id}</span><span class="p mono">—</span><span class="d">${s.name}</span><span class="c mono"></span>`;
     li.onclick=()=>{ const p=App.active; if(!p) return; p.sym=s.id; p.symSel.value=s.id; p.selId=null; p.creating=null; p.load(); App.save(); App.markWatch(); };
     $('wl').appendChild(li);
   });
@@ -2025,7 +2224,6 @@ function boot(){
   App.panels.forEach(p=>p.buildSub());
   App.setLayout(cfgLayout); App.setTool('cursor');
   connectFeed();
-  startUpstoxPolling(); // start Upstox index polling (no-op if no token set)
 
   setInterval(()=>{
     flushTicks(); App.panels.forEach(p=>p.onTick()); updateWatch();
