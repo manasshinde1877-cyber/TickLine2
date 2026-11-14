@@ -315,7 +315,7 @@ button{cursor:pointer;transition:background .15s,color .15s}
 .mw{position:relative;flex:1;min-height:0}
 .ch{position:absolute;inset:0;width:100%;height:100%}
 /* Drawing overlay canvas — sits on top of chart canvas, intercepts nothing */
-.mw canvas.draw-cv{position:absolute;left:0;top:0;pointer-events:none;z-index:2}
+.mw canvas.draw-cv, .sub canvas.sub-cv{position:absolute;left:0;top:0;pointer-events:none;z-index:2}
 .sub{flex:0 0 28%;min-height:60px;max-height:70%;position:relative;border-top:1px solid var(--line);transition:border-color .22s}
 .sub-handle{position:absolute;top:-4px;left:0;right:0;height:8px;cursor:ns-resize;z-index:10}
 .sub-handle:hover::after,.sub-handle:active::after{content:'';position:absolute;top:3px;left:20%;right:20%;height:2px;background:var(--accent);border-radius:2px}
@@ -395,7 +395,7 @@ button{cursor:pointer;transition:background .15s,color .15s}
 </style>
 </head>
 <body>
-<div id="app">
+<div id="app" class="zen">
   <header id="top">
     <div class="brand"><span class="mark"></span>Tickline</div>
     <div class="seg" id="layouts" role="group" aria-label="Charts on screen"></div>
@@ -711,15 +711,22 @@ function crosshairOpts(visible){
 
 function chartOpts(extra){
   rebuildColors();
-  return Object.assign({
+  const base = {
     layout:{background:{type:'solid',color:C.bg}, textColor:C.text, fontFamily:"'IBM Plex Mono',monospace", fontSize:11},
     grid:{vertLines:{color:C.grid}, horzLines:{color:C.grid}},
     ...crosshairOpts(true),
-    rightPriceScale:{borderColor:C.line, minimumWidth:72},
+    rightPriceScale:{borderColor:C.line, minimumWidth:80},
     timeScale:{borderColor:C.line, timeVisible:true, secondsVisible:true, rightOffset:8},
     handleScroll:{mouseWheel:true, pressedMouseMove:false, horzTouchDrag:true, vertTouchDrag:true},
     handleScale:{axisPressedMouseMove:true, mouseWheel:true, pinch:true},
-  }, extra||{});
+  };
+  if (!extra) return base;
+  const res = Object.assign({}, base, extra);
+  if (extra.timeScale) res.timeScale = Object.assign({}, base.timeScale, extra.timeScale);
+  if (extra.rightPriceScale) res.rightPriceScale = Object.assign({}, base.rightPriceScale, extra.rightPriceScale);
+  if (extra.handleScroll) res.handleScroll = Object.assign({}, base.handleScroll, extra.handleScroll);
+  if (extra.handleScale) res.handleScale = Object.assign({}, base.handleScale, extra.handleScale);
+  return res;
 }
 
 /* ============================================================
@@ -765,7 +772,7 @@ class LevelBand {
 class Panel {
   constructor(i, cfg){
     Object.assign(this,{
-      i, sym:cfg.sym, tf:cfg.tf, ind:mkInd(cfg.ind), yZoom:1, yShift:0, _loadedKey:null,
+      i, sym:cfg.sym, tf:cfg.tf, ind:mkInd(cfg.ind), yZoom:1, yShift:0, subYZoom:1, subYShift:0, _loadedKey:null,
       pan:null,
       bars:[], byT:new Map(), selId:null, creating:null, drag:null,
       fitted:false, visible:true, sub:null, syncing:false, hover:false,
@@ -794,7 +801,7 @@ class Panel {
            </button>
            <div class="msg" role="status"></div>
          </div>
-         <div class="sub" hidden><div class="sub-handle"></div><span class="sublbl"></span><div class="ch"></div></div>
+         <div class="sub" hidden><div class="sub-handle"></div><span class="sublbl"></span><div class="ch"></div><canvas class="sub-cv"></canvas></div>
        </div>
        <div class="zen-label"></div>`;
     document.getElementById('grid').appendChild(el);
@@ -803,7 +810,7 @@ class Panel {
     Object.assign(this,{
       symSel:q('.sym'), tfSel:q('.tfsel'), pxEl:q('.px'), chgEl:q('.chg'), ohlcEl:q('.ohlc'),
       mw:q('.mw'), chEl:q('.mw .ch'), cv:q('canvas.draw-cv'), msgEl:q('.msg'),
-      subBox:q('.sub'), subEl:q('.sub .ch'), subLbl:q('.sublbl'),
+      subBox:q('.sub'), subEl:q('.sub .ch'), subLbl:q('.sublbl'), subCv:q('canvas.sub-cv'),
       indBtn:q('.panel-ind-btn'), recenterBtn:q('.panel-recenter-btn'), floatRecenterBtn:q('.panel-float-recenter'), zenLbl:q('.zen-label'),
       pbody:q('.pbody'), subHandle:q('.sub-handle'),
     });
@@ -811,6 +818,7 @@ class Panel {
     SYMS.forEach(s => this.symSel.add(new Option(s.id,s.id)));
     TFS.forEach(([l,v]) => this.tfSel.add(new Option(l,v)));
     this.symSel.value = this.sym; this.tfSel.value = this.tf;
+    this._updateZenLabel();
     this.symSel.onchange = () => { this.sym=this.symSel.value; this.selId=null; this.creating=null; this.load(); App.save(); App.markWatch(); this._updateZenLabel(); };
     this.tfSel.onchange  = () => { App.setTf(+this.tfSel.value, this); };
 
@@ -864,6 +872,34 @@ class Panel {
       this.panEnd();
     });
     window.addEventListener('blur', () => this.panEnd());
+
+    // subchart (RSI / MACD) wheel and interaction
+    this.subBox.addEventListener('wheel', e => this._onSubWheel(e), {capture:true, passive:false});
+    this.subBox.addEventListener('dblclick', e => {
+      this.subYZoom = 1;
+      this.subYShift = 0;
+      this._refreshSubYScale();
+    }, true);
+    this.subBox.addEventListener('mousemove', e => {
+      const r = this.subBox.getBoundingClientRect();
+      const x = e.clientX - r.left;
+      const psW = (this.sub && this.sub.priceScale('right').width()) || 80;
+      this.subBox.style.cursor = (x > this.subBox.clientWidth - psW) ? 'ns-resize' : 'crosshair';
+      if (this.bars.length && App.tool === 'cursor'){
+        const pl = this.plot();
+        if (x >= 0 && x <= pl.w){
+          App.crosshair = { relX: x / pl.w, relY: null, active: true };
+          this.hover = true;
+        } else {
+          if (App.crosshair) App.crosshair.active = false;
+        }
+      }
+    });
+    this.subBox.addEventListener('mouseleave', () => {
+      this.hover = false;
+      if (App.crosshair) App.crosshair.active = false;
+    });
+
     this.load();
   }
 
@@ -897,6 +933,67 @@ class Panel {
     this.candles.applyOptions({});
   }
 
+  /* Subchart (RSI / MACD) autoscale and scaling */
+  _subScale(orig){
+    const r = orig();
+    if (!r || !r.priceRange) return r;
+    const shift = this.subYShift || 0;
+    const zoom  = this.subYZoom  || 1;
+    if (zoom === 1 && shift === 0) return r;
+    const a = r.priceRange.minValue, b = r.priceRange.maxValue;
+    const c = (a + b) / 2 + shift, h = (b - a) / 2 * zoom;
+    return { priceRange:{ minValue:c - h, maxValue:c + h }, margins:r.margins };
+  }
+
+  _refreshSubYScale(){
+    if (!this.sub) return;
+    this.sub.priceScale('right').applyOptions({ autoScale:true });
+    if (this.sRsi) this.sRsi.applyOptions({});
+    if (this.sHist) this.sHist.applyOptions({});
+    if (this.sMac) this.sMac.applyOptions({});
+    if (this.sSig) this.sSig.applyOptions({});
+  }
+
+  _syncPriceScaleWidth(){
+    if (!this.chart) return;
+    const w1 = this.chart.priceScale('right').width() || 0;
+    const w2 = (this.sub && this.sub.priceScale('right').width()) || 0;
+    const targetW = Math.max(80, w1, w2);
+    this.chart.priceScale('right').applyOptions({ minimumWidth: targetW });
+    if (this.sub){
+      this.sub.priceScale('right').applyOptions({ minimumWidth: targetW });
+    }
+  }
+
+  /* Subchart wheel: over right price scale → Y-only zoom; over plot area → X zoom aligned with chart */
+  _onSubWheel(e){
+    if (!this.sub || !this.bars.length) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const r = this.subBox.getBoundingClientRect();
+    const x = e.clientX - r.left;
+    const psW = this.sub.priceScale('right').width() || 80;
+    const onPrice = x > (this.subBox.clientWidth - psW);
+    const f = Math.exp(Math.max(-100, Math.min(100, e.deltaY)) * 0.0015);
+
+    if (onPrice){
+      this.subYZoom = Math.max(0.02, Math.min(50, (this.subYZoom || 1) * f));
+      this._refreshSubYScale();
+    } else {
+      const ts = this.chart.timeScale();
+      const vr = ts.getVisibleLogicalRange();
+      const anchor = ts.coordinateToLogical(x);
+      if (!vr || anchor === null) return;
+      const width = vr.to - vr.from;
+      const nw = Math.max(5, Math.min(5000, width * f));
+      const ratio = (anchor - vr.from) / width;
+      const from = anchor - ratio * nw;
+      const to = from + nw;
+      ts.setVisibleLogicalRange({ from, to });
+      if (this.sub) this.sub.timeScale().setVisibleLogicalRange({ from, to });
+    }
+  }
+
   /* Wheel over the price axis → Y-only zoom; over the time axis → X zoom anchored at cursor */
   _onWheel(e){
     if (!this.bars.length) return;
@@ -917,7 +1014,9 @@ class Panel {
       const nw = Math.max(5, Math.min(5000, width * f));
       const ratio = (anchor - vr.from) / width;
       const from = anchor - ratio * nw;
-      ts.setVisibleLogicalRange({ from, to: from + nw });
+      const to = from + nw;
+      ts.setVisibleLogicalRange({ from, to });
+      if (this.sub) this.sub.timeScale().setVisibleLogicalRange({ from, to });
     }
   }
 
@@ -939,6 +1038,7 @@ class Panel {
 
     ch.timeScale().subscribeVisibleLogicalRangeChange(r => {
       if (this.sub && r && !this.syncing){ this.syncing=true; this.sub.timeScale().setVisibleLogicalRange(r); this.syncing=false; }
+      this._syncPriceScaleWidth();
     });
     ch.subscribeCrosshairMove(p => {
       const b = p.time !== undefined ? this.byT.get(p.time) : null;
@@ -962,6 +1062,7 @@ class Panel {
       const sw=this.subEl.clientWidth, sh=this.subEl.clientHeight;
       if (sw>0 && sh>0) this.sub.resize(sw, sh);
     }
+    this._syncPriceScaleWidth();
   }
 
   /* ----- theme change ----- */
@@ -985,12 +1086,13 @@ class Panel {
     });
     if (this.sVwap) this.sVwap.applyOptions({color: '#e07a5f'});
 
-    if (this.sub) this.sub.applyOptions(chartOpts({timeScale:{visible:false,borderColor:C.line}}));
+    if (this.sub) this.sub.applyOptions(chartOpts({timeScale:{visible:false,borderColor:C.line,rightOffset:8}}));
     if (this.sRsi) this.sRsi.applyOptions({color:C.violet});
     if (this.sMac) this.sMac.applyOptions({color:C.accent});
     if (this.sSig) this.sSig.applyOptions({color:C.amber});
 
     this.syncInd(true);
+    this._syncPriceScaleWidth();
   }
 
   /* ----- per-panel indicator popup helpers ----- */
@@ -1068,10 +1170,18 @@ class Panel {
     this.byT  = new Map(bars.map(b => [b.t, b]));
     const d = S[sym].dec;
     const key = sym + '|' + tf;
-    if (this._loadedKey !== key){ this._loadedKey = key; this.yZoom = 1; this.yShift = 0; }   // new symbol/timeframe → reset Y zoom & pan
+    if (this._loadedKey !== key){
+      this._loadedKey = key;
+      this.yZoom = 1;
+      this.yShift = 0;
+      this.subYZoom = 1;
+      this.subYShift = 0;
+      this._refreshSubYScale();
+    }   // new symbol/timeframe → reset Y zoom & pan
     this.candles.applyOptions({priceFormat:{type:'price', precision:d, minMove:1/10**d}});
     this.candles.setData(bars.map(b => ({time:b.t,open:b.o,high:b.h,low:b.l,close:b.c})));
     this.syncInd(true);
+    this._syncPriceScaleWidth();
     this.fitted = false;
     if (this.mw.clientWidth>0){ this.fit(); this.fitted=true; }
     this.showOhlc(bars[bars.length-1]); this.updateQuote();
@@ -1082,7 +1192,10 @@ class Panel {
   recenter(){
     this.yZoom = 1;
     this.yShift = 0;
+    this.subYZoom = 1;
+    this.subYShift = 0;
     this._refreshYScale();
+    this._refreshSubYScale();
     this.fit();
     if (this.bars.length) this.showOhlc(this.bars[this.bars.length-1]);
   }
@@ -1099,7 +1212,7 @@ class Panel {
         this.bars.push(x); this.byT.set(t,x); this.candles.update(cand(x)); last=x; added++;
       }
     } else { last.h=Math.max(last.h,s.hi); last.l=Math.min(last.l,s.lo); last.c=s.price; last.v+=s.tickV; this.candles.update(cand(last)); }
-    this.syncInd(added>1);
+    this.syncInd(added>0);
     this.updateQuote();
     if (!this.hover) this.showOhlc(last);
   }
@@ -1129,10 +1242,18 @@ class Panel {
       if (!on){ if(full) s.setData([]); return; }
       if (full){
         const d=[];
-        if (arr){ for(let i=0;i<n;i++) if(arr[i]!=null) d.push({time:b[i].t,value:arr[i]}); }
+        if (arr){
+          for(let i=0;i<n;i++){
+            if(arr[i]!=null) d.push({time:b[i].t, value:arr[i]});
+            else d.push({time:b[i].t});
+          }
+        }
         s.setData(d);
       }
-      else if (arr && arr[L]!=null) s.update({time:b[L].t, value:arr[L]});
+      else if (arr){
+        if (arr[L]!=null) s.update({time:b[L].t, value:arr[L]});
+        else s.update({time:b[L].t});
+      }
     };
 
     // volume
@@ -1274,6 +1395,9 @@ class Panel {
 
     // sub-chart
     if (this.sub){
+      if (this.subAnchor){
+        this.subAnchor.setData(b.map(x => ({time: x.t, value: 0})));
+      }
       if (I.sub==='rsi'){
         const rsiN = this._p('rsiN',14);
         put(this.sRsi, rsi(cl,rsiN), true);
@@ -1283,7 +1407,11 @@ class Panel {
         const m = macd(cl,mF,mS,mG);
         put(this.sMac, m.m, true); put(this.sSig, m.sig, true);
         if (full){
-          const d=[]; for(let i=0;i<n;i++) if(m.hist[i]!=null) d.push({time:b[i].t,value:m.hist[i],color:rgba(m.hist[i]>=0?C.up:C.down,.6)});
+          const d=[];
+          for(let i=0;i<n;i++){
+            if (m.hist[i]!=null) d.push({time:b[i].t, value:m.hist[i], color:rgba(m.hist[i]>=0?C.up:C.down,.6)});
+            else d.push({time:b[i].t});
+          }
           this.sHist.setData(d);
         } else if (m.hist[L]!=null){
           this.sHist.update({time:b[L].t, value:m.hist[L], color:rgba(m.hist[L]>=0?C.up:C.down,.6)});
@@ -1294,18 +1422,29 @@ class Panel {
   }
 
   buildSub(){
-    if (this.sub){ this.sub.remove(); this.sub=null; }
+    if (this.sub){ this.sub.remove(); this.sub=null; this.subAnchor=null; }
     const kind=this.ind.sub; this.subBox.hidden=!kind;
     if (!kind) return;
     rebuildColors();
-    const sc = this.sub = LightweightCharts.createChart(this.subEl, chartOpts({timeScale:{visible:false,borderColor:C.line}, handleScroll:{pressedMouseMove:true}}));
+    const sc = this.sub = LightweightCharts.createChart(this.subEl, chartOpts({
+      timeScale:{visible:false, borderColor:C.line, rightOffset:8},
+      handleScroll:{pressedMouseMove:true}
+    }));
+
+    this.subAnchor = sc.addLineSeries({
+      visible: false,
+      lastValueVisible: false,
+      priceLineVisible: false,
+      crosshairMarkerVisible: false,
+      autoscaleInfoProvider: () => null,
+    });
 
     // label reflects current params
     const rsiN  = this._p('rsiN',14);
     const mF=this._p('macdF',12), mS=Math.max(mF+1,this._p('macdS',26)), mG=this._p('macdG',9);
     this.subLbl.textContent = kind==='rsi' ? `RSI ${rsiN}` : `MACD ${mF} ${mS} ${mG}`;
 
-    const o = {lastValueVisible:true, priceLineVisible:false};
+    const o = {lastValueVisible:true, priceLineVisible:false, autoscaleInfoProvider: orig => this._subScale(orig)};
     if (kind==='rsi'){
       const rsiLineCol = this.ind.rsiColor   || C.violet;
       const rsiOBCol   = this.ind.rsiOBColor  || 'rgba(239,68,68,0.6)';
@@ -1319,17 +1458,19 @@ class Panel {
       // translucent #CAA8D9 tint between OS and OB
       try { this.sRsi.attachPrimitive(new LevelBand(this.sRsi, () => [rU, rL], 'rgba(202,168,217,0.36)')); } catch(e){}
     } else {
-      this.sHist = sc.addHistogramSeries({priceLineVisible:false,lastValueVisible:false});
+      this.sHist = sc.addHistogramSeries({priceLineVisible:false,lastValueVisible:false, autoscaleInfoProvider: orig => this._subScale(orig)});
       this.sMac  = sc.addLineSeries(Object.assign({color:C.accent,lineWidth:2},o));
       this.sSig  = sc.addLineSeries(Object.assign({color:C.amber,lineWidth:1},o));
     }
     sc.timeScale().subscribeVisibleLogicalRangeChange(r => {
       if (r && !this.syncing){ this.syncing=true; this.chart.timeScale().setVisibleLogicalRange(r); this.syncing=false; }
+      this._syncPriceScaleWidth();
     });
     this._resize();
     this.syncInd(true);
     this.updateIndBtn();
     const r = this.chart.timeScale().getVisibleLogicalRange(); if(r) sc.timeScale().setVisibleLogicalRange(r);
+    this._syncPriceScaleWidth();
   }
 
   /* ----- coordinate helpers ----- */
@@ -1341,7 +1482,7 @@ class Panel {
     if (x === null){
       const vr = this.chart.timeScale().getVisibleLogicalRange();
       if (!vr) return null;
-      const psW = this.chart.priceScale('right').width() || 72;
+      const psW = this.chart.priceScale('right').width() || 80;
       const chartW = Math.max(1, this.mw.clientWidth - psW);
       x = (l - vr.from) / (vr.to - vr.from) * chartW;
     }
@@ -1358,7 +1499,7 @@ class Panel {
     // fallback: estimate from visible range
     const vr = this.chart.timeScale().getVisibleLogicalRange();
     if (!vr) return null;
-    const psW = this.chart.priceScale('right').width() || 72;
+    const psW = this.chart.priceScale('right').width() || 80;
     const chartW = Math.max(1, this.mw.clientWidth - psW);
     const frac = Math.max(0, Math.min(1, x / chartW));
     return this.bars[0].t + Math.round(vr.from + frac * (vr.to - vr.from)) * this.tf;
@@ -1368,7 +1509,7 @@ class Panel {
 
   plot(){
     return {
-      w: this.mw.clientWidth  - (this.chart.priceScale('right').width()  || 72),
+      w: this.mw.clientWidth  - (this.chart.priceScale('right').width()  || 80),
       h: this.mw.clientHeight - (this.chart.timeScale().height()          || 25),
     };
   }
@@ -1556,33 +1697,37 @@ class Panel {
     }
 
     // Synced crosshair dotted lines across all charts (matched by relative canvas coordinates)
-    if (App.crosshair && App.crosshair.active && App.crosshair.relX !== null && App.crosshair.relY !== null){
+    if (App.crosshair && App.crosshair.active && App.crosshair.relX !== null){
       const cx = App.crosshair.relX * pl.w;
-      const cy = App.crosshair.relY * pl.h;
-      if (cx >= 0 && cx <= pl.w && cy >= 0 && cy <= pl.h){
+      const cy = (App.crosshair.relY !== null && App.crosshair.relY !== undefined) ? App.crosshair.relY * pl.h : null;
+      if (cx >= 0 && cx <= pl.w){
+        const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+        const lineCol = isLight ? 'rgba(0, 0, 0, 0.45)' : 'rgba(255, 255, 255, 0.45)';
+        const vx = Math.round(cx) + 0.5;
+
         g.save();
         g.beginPath();
-        g.rect(0, 0, pl.w, pl.h);
+        g.rect(0, 0, pl.w, h);
         g.clip();
 
         g.setLineDash([3, 3]);
         g.lineWidth = 1;
-        const isLight = document.documentElement.getAttribute('data-theme') === 'light';
-        g.strokeStyle = isLight ? 'rgba(0, 0, 0, 0.45)' : 'rgba(255, 255, 255, 0.45)';
+        g.strokeStyle = lineCol;
 
-        // Vertical dotted line
-        const vx = Math.round(cx) + 0.5;
+        // Vertical dotted line: extends full height of mw to join seamlessly with sub pane
         g.beginPath();
         g.moveTo(vx, 0);
-        g.lineTo(vx, pl.h);
+        g.lineTo(vx, h);
         g.stroke();
 
         // Horizontal dotted line
-        const hy = Math.round(cy) + 0.5;
-        g.beginPath();
-        g.moveTo(0, hy);
-        g.lineTo(pl.w, hy);
-        g.stroke();
+        if (cy !== null && cy >= 0 && cy <= pl.h){
+          const hy = Math.round(cy) + 0.5;
+          g.beginPath();
+          g.moveTo(0, hy);
+          g.lineTo(pl.w, hy);
+          g.stroke();
+        }
 
         g.restore();
 
@@ -1591,27 +1736,29 @@ class Panel {
         const badgeFg = isLight ? '#ffffff' : '#0d0d0d';
 
         // 1. Price Badge (on right price scale at horizontal line position)
-        const price = this.P(cy);
-        if (price !== null && isFinite(price)){
-          const priceStr = fp(this.sym, price);
-          const badgeH = 18;
-          const badgeY = Math.max(1, Math.min(pl.h - badgeH - 1, Math.round(cy - badgeH / 2)));
-          const badgeX = pl.w + 1;
-          const badgeW = Math.max(68, w - pl.w - 2);
+        if (cy !== null && cy >= 0 && cy <= pl.h){
+          const price = this.P(cy);
+          if (price !== null && isFinite(price)){
+            const priceStr = fp(this.sym, price);
+            const badgeH = 18;
+            const badgeY = Math.max(1, Math.min(pl.h - badgeH - 1, Math.round(cy - badgeH / 2)));
+            const badgeX = pl.w + 1;
+            const badgeW = Math.max(68, w - pl.w - 2);
 
-          g.save();
-          g.fillStyle = badgeBg;
-          g.beginPath();
-          if (g.roundRect) g.roundRect(badgeX, badgeY, badgeW, badgeH, 3);
-          else g.rect(badgeX, badgeY, badgeW, badgeH);
-          g.fill();
+            g.save();
+            g.fillStyle = badgeBg;
+            g.beginPath();
+            if (g.roundRect) g.roundRect(badgeX, badgeY, badgeW, badgeH, 3);
+            else g.rect(badgeX, badgeY, badgeW, badgeH);
+            g.fill();
 
-          g.fillStyle = badgeFg;
-          g.font = "600 11px 'IBM Plex Mono', monospace";
-          g.textAlign = 'center';
-          g.textBaseline = 'middle';
-          g.fillText(priceStr, badgeX + badgeW / 2, badgeY + badgeH / 2);
-          g.restore();
+            g.fillStyle = badgeFg;
+            g.font = "600 11px 'IBM Plex Mono', monospace";
+            g.textAlign = 'center';
+            g.textBaseline = 'middle';
+            g.fillText(priceStr, badgeX + badgeW / 2, badgeY + badgeH / 2);
+            g.restore();
+          }
         }
 
         // 2. Time Badge (on bottom time scale at vertical line position)
@@ -1638,6 +1785,39 @@ class Panel {
           g.fillText(timeStr, badgeX + badgeW / 2, badgeY + badgeH / 2);
           g.restore();
         }
+
+        // 3. Vertical dotted line passing into RSI / MACD sub pane
+        if (this.sub && !this.subBox.hidden && this.subCv){
+          const sw = this.subBox.clientWidth, sh = this.subBox.clientHeight;
+          if (sw > 0 && sh > 0){
+            if (this.subCv.width !== Math.round(sw * dpr) || this.subCv.height !== Math.round(sh * dpr)){
+              this.subCv.width = Math.round(sw * dpr);
+              this.subCv.height = Math.round(sh * dpr);
+              this.subCv.style.width = sw + 'px';
+              this.subCv.style.height = sh + 'px';
+            }
+            const sg = this.subCv.getContext('2d');
+            sg.setTransform(dpr, 0, 0, dpr, 0, 0);
+            sg.clearRect(0, 0, sw, sh);
+            sg.save();
+            sg.beginPath();
+            sg.rect(0, 0, pl.w, sh);
+            sg.clip();
+            sg.setLineDash([3, 3]);
+            sg.lineWidth = 1;
+            sg.strokeStyle = lineCol;
+            sg.beginPath();
+            sg.moveTo(vx, 0);
+            sg.lineTo(vx, sh);
+            sg.stroke();
+            sg.restore();
+          }
+        }
+      }
+    } else {
+      if (this.subCv && this.subCv.width > 0){
+        const sg = this.subCv.getContext('2d');
+        sg.clearRect(0, 0, this.subCv.width, this.subCv.height);
       }
     }
   }
@@ -1763,7 +1943,7 @@ const App = {
   crosshair:{ relX:null, relY:null, active:false },
 
   save(){
-    try{ localStorage.setItem(STORE, JSON.stringify({layout:this.layout, panels:this.panels.map(p=>({sym:p.sym,tf:p.tf,ind:p.ind}))})); }catch(e){}
+    try{ localStorage.setItem(STORE, JSON.stringify({layout:this.layout, zen:this._zen, panels:this.panels.map(p=>({sym:p.sym,tf:p.tf,ind:p.ind}))})); }catch(e){}
   },
 
   setActive(p){
@@ -1840,12 +2020,13 @@ const App = {
   },
 
   /* ----- Zen Mode ----- */
-  _zen: false,
+  _zen: true,
 
-  toggleZen(){
-    this._zen = !this._zen;
+  toggleZen(force){
+    this._zen = force !== undefined ? !!force : !this._zen;
     const appEl = document.getElementById('app');
-    appEl.classList.toggle('zen', this._zen);
+    if (appEl) appEl.classList.toggle('zen', this._zen);
+    this.save();
     // Update panels after grid re-layout
     setTimeout(() => App.panels.forEach(p => p._resize()), 50);
     setTimeout(() => App.panels.forEach(p => {
@@ -2203,19 +2384,22 @@ function updateWatch(){
    BOOT
    ============================================================ */
 function boot(){
-  let cfgPanels=DEFAULTS.slice(0,6), cfgLayout=4;
+  let cfgPanels=DEFAULTS.slice(0,6), cfgLayout=4, cfgZen=true;
   try{
     const raw=JSON.parse(localStorage.getItem(STORE)||'null');
-    if (raw && Array.isArray(raw.panels) && raw.panels.length>=1){
-      cfgLayout=Math.min(6, raw.layout||4); // clamp to max 6
-      cfgPanels=Array.from({length:6},(_,i)=>{
-        const p=raw.panels[i], def=DEFAULTS[i]||DEFAULTS[0];
-        if(!p) return def;
-        const sym=S[p.sym]?p.sym:def.sym;
-        const tf=TFS.some(t=>t[1]===p.tf)?p.tf:def.tf;
-        const ind=p.ind ? mkInd(p.ind) : mkInd(def.ind);
-        return {sym,tf,ind};
-      });
+    if (raw){
+      if (raw.zen !== undefined) cfgZen = !!raw.zen;
+      if (Array.isArray(raw.panels) && raw.panels.length>=1){
+        cfgLayout=Math.min(6, raw.layout||4); // clamp to max 6
+        cfgPanels=Array.from({length:6},(_,i)=>{
+          const p=raw.panels[i], def=DEFAULTS[i]||DEFAULTS[0];
+          if(!p) return def;
+          const sym=S[p.sym]?p.sym:def.sym;
+          const tf=TFS.some(t=>t[1]===p.tf)?p.tf:def.tf;
+          const ind=p.ind ? mkInd(p.ind) : mkInd(def.ind);
+          return {sym,tf,ind};
+        });
+      }
     }
   }catch(e){}
 
@@ -2223,6 +2407,7 @@ function boot(){
   cfgPanels.forEach((c,i)=>App.panels.push(new Panel(i,c)));
   App.panels.forEach(p=>p.buildSub());
   App.setLayout(cfgLayout); App.setTool('cursor');
+  App.toggleZen(cfgZen);
   connectFeed();
 
   setInterval(()=>{
